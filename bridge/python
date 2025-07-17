@@ -1,0 +1,325 @@
+import os
+import subprocess
+import json
+import base64
+import logging
+import threading
+import time
+import requests # For making HTTP requests to CometBFT RPC
+from flask import Flask, jsonify, render_template_string
+
+# --- Configuration ---
+# IMPORTANT: Replace this with the actual path to your Serf executable
+# You previously found this to be /usr/bin/serf
+SERF_EXECUTABLE_PATH = "/usr/bin/serf" # CONFIRM THIS PATH
+SERF_RPC_ADDR = "127.0.0.1:7373" # CONFIRM YOUR SERF AGENT'S RPC ADDRESS
+
+# NEW: CometBFT RPC URL
+# This should be the URL where your actual CometBFT node's RPC is exposed.
+# For example, "http://localhost:26657" or "http://YOUR_COMETBFT_NODE_IP:26657"
+COMETBFT_RPC_URL = "http://localhost:26657" # <<< CONFIGURE YOUR REAL COMETBFT RPC URL
+
+# --- Flask Application Setup ---
+app = Flask(__name__)
+
+# Configure logging for the Flask app and the Serf monitor
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# --- CometBFT RPC Client (Replaces MockMempool) ---
+
+class MockResponseCheckTx:
+    """
+    Mock class to simulate CometBFT's ResponseCheckTx for internal handling.
+    This is still used because the real RPC call returns a JSON response,
+    which we then map to this familiar structure for consistency with callbacks.
+    """
+    def __init__(self, code=0, log="", hash="", height=0, index=0):
+        self.code = code
+        self.log = log
+        self.hash = hash
+        self.height = height
+        self.index = index
+
+    def to_dict(self):
+        """Converts the mock response to a dictionary."""
+        return {
+            "Code": self.code,
+            "Log": self.log,
+            "Hash": self.hash,
+            "Height": self.height,
+            "Index": self.index
+        }
+
+class CometBFTMempoolClient:
+    """
+    Client to interact with a real CometBFT node's mempool via RPC.
+    It exposes a `CheckTx` method similar to the mock for compatibility.
+    """
+    def __init__(self, rpc_url: str):
+        self.rpc_url = rpc_url
+        logger.info(f"CometBFTMempoolClient initialized with RPC URL: {self.rpc_url}")
+
+    def CheckTx(self, tx_bytes: bytes, cb: callable, tx_info: dict) -> None:
+        """
+        Sends a transaction to the real CometBFT node's mempool via broadcast_tx_sync RPC.
+        It calls the provided callback `cb` with the RPC response.
+        """
+        tx_b64 = base64.b64encode(tx_bytes).decode('utf-8')
+        endpoint = f"{self.rpc_url}/broadcast_tx_sync"
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "broadcast_tx_sync",
+            "params": [tx_b64],
+            "id": 1 # Unique request ID
+        }
+
+        try:
+            logger.info(f"Attempting to broadcast transaction (hash: {tx_b64[:10]}...) to CometBFT RPC: {endpoint}")
+            response = requests.post(endpoint, headers=headers, json=payload, timeout=10)
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+            rpc_result = response.json()
+
+            if "result" in rpc_result:
+                tx_result = rpc_result["result"]
+                comet_response = MockResponseCheckTx(
+                    code=tx_result.get("code", -1),
+                    log=tx_result.get("log", "No log message"),
+                    hash=tx_result.get("hash", ""),
+                    height=tx_result.get("height", 0),
+                    index=tx_result.get("index", 0)
+                )
+                logger.info(f"CometBFT RPC response received: {comet_response.to_dict()}")
+                cb(comet_response)
+            elif "error" in rpc_result:
+                error_details = rpc_result["error"]
+                logger.error(f"CometBFT RPC error for broadcast_tx_sync: Code={error_details.get('code')}, Message={error_details.get('message')}, Data={error_details.get('data')}")
+                cb(MockResponseCheckTx(code=error_details.get('code', -1), log=f"RPC Error: {error_details.get('message')}"))
+            else:
+                logger.error(f"Unexpected CometBFT RPC response format: {rpc_result}")
+                cb(MockResponseCheckTx(code=-1, log="Unexpected RPC response format"))
+
+        except requests.exceptions.Timeout:
+            logger.error(f"CometBFT RPC request timed out to {endpoint}")
+            cb(MockResponseCheckTx(code=-1, log="CometBFT RPC Timeout"))
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Could not connect to CometBFT RPC at {endpoint}: {e}")
+            cb(MockResponseCheckTx(code=-1, log=f"CometBFT RPC Connection Error: {e}"))
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during CometBFT RPC call: {e}")
+            cb(MockResponseCheckTx(code=-1, log=f"Unexpected Error: {e}"))
+
+    # --- Stub implementations for other Mempool methods (to satisfy conceptual interface) ---
+    # These methods are typically not called by the SerfAdapter logic directly,
+    # but are part of the full Mempool interface for a real CometBFT node.
+    def ReapMaxBytesMaxGas(self, max_bytes: int, max_gas: int) -> list:
+        logger.debug("CometBFTMempoolClient: ReapMaxBytesMaxGas called (stub)")
+        return []
+
+    def ReapMaxTxs(self, max_txs: int) -> list:
+        logger.debug("CometBFTMempoolClient: ReapMaxTxs called (stub)")
+        return []
+
+    def Update(self, height: int, txs: list, tx_results: list, pre_check: callable, post_check: callable) -> None:
+        logger.debug(f"CometBFTMempoolClient: Update called (stub) for height {height} with {len(txs)} txs")
+        return None
+
+    def Flush(self) -> None:
+        logger.debug("CometBFTMempoolClient: Flush called (stub)")
+        return None
+
+    def FlushAppConn(self) -> None:
+        logger.debug("CometBFTMempoolClient: FlushAppConn called (stub)")
+        return None
+
+    def TxsAvailable(self) -> threading.Event:
+        logger.debug("CometBFTMempoolClient: TxsAvailable called (stub)")
+        event = threading.Event()
+        event.set()
+        return event
+
+    def EnableTxsAvailable(self) -> None:
+        logger.debug("CometBFTMempoolClient: EnableTxsAvailable called (stub)")
+        return None
+
+    def Size(self) -> int:
+        logger.debug("CometBFTMempoolClient: Size called (stub)")
+        return 0
+
+    def SizeBytes(self) -> int:
+        logger.debug("CometBFTMempoolClient: SizeBytes called (stub)")
+        return 0
+
+    def Lock(self) -> None:
+        logger.debug("CometBFTMempoolClient: Lock called (stub)")
+        return None
+
+    def Unlock(self) -> None:
+        logger.debug("CometBFTMempoolClient: Unlock called (stub)")
+        return None
+
+    def RemoveTxByKey(self, tx_key: bytes) -> None:
+        logger.debug(f"CometBFTMempoolClient: RemoveTxByKey called (stub) for key: {tx_key}")
+        return None
+
+# Global CometBFT mempool client instance (replaces mock_mempool)
+cometbft_mempool_client = CometBFTMempoolClient(COMETBFT_RPC_URL)
+
+# --- Serf Event Monitor Thread ---
+
+def serf_monitor_thread(serf_exec_path: str, rpc_addr: str, mempool_client: CometBFTMempoolClient):
+    """
+    Runs the 'serf stream' command in a subprocess and processes its JSON output.
+    This function runs in a separate thread to avoid blocking the Flask main thread.
+    """
+    logger.info(f"Serf monitor thread starting. Connecting to Serf RPC: {rpc_addr}")
+    try:
+        cmd_args = [serf_exec_path, "stream", "-event=user", "-format=json", f"-rpc-addr={rpc_addr}"]
+        process = subprocess.Popen(cmd_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+
+        logger.info("Serf stream command launched. Listening for user events (JSON format)...")
+
+        for line in iter(process.stdout.readline, ''):
+            line = line.strip()
+            if not line:
+                continue
+
+            logger.debug(f"Received raw Serf stream line: {line}") # Changed to debug as it can be verbose
+
+            try:
+                event_data = json.loads(line)
+                event_type = event_data.get("Type")
+                event_name = event_data.get("Name")
+                event_payload_b64 = event_data.get("Payload")
+
+                if event_type == "user" and event_name and event_payload_b64 is not None:
+                    logger.info(f"Parsed Serf user event: Name='{event_name}', Payload(base64)='{event_payload_b64[:30]}...'")
+
+                    try:
+                        decoded_tx_bytes = base64.b64decode(event_payload_b64)
+                    except Exception as e:
+                        logger.error(f"Failed to base64 decode payload for event '{event_name}': {e}")
+                        continue
+
+                    # Define the callback for the CometBFT mempool client's CheckTx (RPC broadcast)
+                    def check_tx_response_callback(response: MockResponseCheckTx):
+                        if response.code == 0:
+                            logger.info(
+                                f"CometBFT RPC Broadcast Success for event '{event_name}': "
+                                f"Code={response.code}, Log='{response.log}', Hash={response.hash}"
+                            )
+                        else:
+                            logger.error(
+                                f"CometBFT RPC Broadcast Failed for event '{event_name}': "
+                                f"Code={response.code}, Log='{response.log}'"
+                            )
+
+                    # Create a dummy TxInfo dictionary (conceptually passed, actual RPC might not use it directly)
+                    tx_info = {}
+
+                    # Call the CometBFT RPC client's CheckTx (which now broadcasts via RPC)
+                    mempool_client.CheckTx(decoded_tx_bytes, check_tx_response_callback, tx_info)
+
+                else:
+                    logger.debug(f"Received non-user or incomplete event: {event_data}")
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to decode JSON from Serf stream: {e}. Line: {line}")
+            except Exception as e:
+                logger.error(f"Error processing Serf stream line: {e}. Line: {line}")
+
+        stderr_output = process.stderr.read()
+        if stderr_output:
+            logger.error(f"Serf stream stderr: {stderr_output}")
+
+        process.wait()
+        if process.returncode != 0:
+            logger.error(f"Serf stream command exited with non-zero status: {process.returncode}")
+
+    except FileNotFoundError:
+        logger.critical(f"Serf executable not found at '{serf_exec_path}'. Please ensure Serf is installed and the path is correct.")
+    except Exception as e:
+        logger.critical(f"Failed to start or monitor Serf stream: {e}")
+
+# Start the Serf monitor in a separate thread when the Flask app starts
+@app.before_first_request
+def start_serf_monitor_thread():
+    """
+    Initializes and starts the Serf monitor thread before the first request to the Flask app.
+    """
+    if not os.path.exists(SERF_EXECUTABLE_PATH) or not os.access(SERF_EXECUTABLE_PATH, os.X_OK):
+        logger.critical(f"Serf executable not found or not executable at '{SERF_EXECUTABLE_PATH}'. Please check configuration.")
+        return
+
+    thread = threading.Thread(
+        target=serf_monitor_thread,
+        args=(SERF_EXECUTABLE_PATH, SERF_RPC_ADDR, cometbft_mempool_client), # Pass the real client
+        name="SerfMonitorThread"
+    )
+    thread.daemon = True
+    thread.start()
+    logger.info("Serf monitor thread initiated.")
+
+@app.route('/')
+def index():
+    """A simple index page for the Flask application."""
+    return render_template_string("""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Flask Serf Bridge</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+            <style>
+                body { font-family: 'Inter', sans-serif; }
+            </style>
+        </head>
+        <body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+            <div class="bg-white p-8 rounded-lg shadow-xl text-center max-w-lg w-full border border-gray-200">
+                <h1 class="text-4xl font-bold text-gray-800 mb-4">✨ Flask Serf Bridge ✨</h1>
+                <p class="text-gray-600 text-lg mb-6">
+                    This Flask application is actively monitoring Serf user events
+                    and broadcasting them to a <span class="font-semibold text-blue-600">real CometBFT node</span> via RPC.
+                </p>
+                <div class="bg-blue-50 border-l-4 border-blue-500 text-blue-700 p-4 rounded-md mb-6" role="alert">
+                    <p class="font-bold">Important:</p>
+                    <p class="text-sm">Ensure your CometBFT node is running and accessible at the configured RPC URL.</p>
+                </div>
+                <p class="text-gray-700 text-sm italic mb-4">
+                    Check your server's console for live event and CometBFT RPC logs.
+                </p>
+                <div class="text-left bg-gray-50 p-4 rounded-md border border-gray-200 text-gray-700">
+                    <p class="text-sm font-medium mb-1">Configuration:</p>
+                    <p class="text-xs break-all">Serf Executable Path: <span class="font-mono text-gray-900">{{ serf_exec_path }}</span></p>
+                    <p class="text-xs break-all">Serf RPC Address: <span class="font-mono text-gray-900">{{ serf_rpc_addr }}</span></p>
+                    <p class="text-xs break-all font-bold mt-2">CometBFT RPC URL: <span class="font-mono text-blue-700">{{ cometbft_rpc_url }}</span></p>
+                </div>
+                <div class="mt-8 flex flex-col sm:flex-row justify-center space-y-3 sm:space-y-0 sm:space-x-4">
+                    <a href="/status" class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition duration-150 ease-in-out">
+                        View Status API
+                        <svg class="ml-2 -mr-1 h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M10.293 15.707a1 1 0 010-1.414L14.586 10l-4.293-4.293a1 1 0 111.414-1.414l5 5a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+                            <path fill-rule="evenodd" d="M4.293 15.707a1 1 0 010-1.414L8.586 10 4.293 5.707a1 1 0 011.414-1.414l5 5a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+                        </svg>
+                    </a>
+                </div>
+            </div>
+        </body>
+        </html>
+    """, serf_exec_path=SERF_EXECUTABLE_PATH, serf_rpc_addr=SERF_RPC_ADDR, cometbft_rpc_url=COMETBFT_RPC_URL)
+
+@app.route('/status')
+def status():
+    """An API endpoint to check the application status."""
+    return jsonify({
+        "status": "running",
+        "serf_rpc_address": SERF_RPC_ADDR,
+        "cometbft_rpc_url": COMETBFT_RPC_URL,
+        "mempool_integration": "real_rpc"
+    })
+
+if __name__ == '__main__':
+    app.run(debug=False, host='0.0.0.0', port=5000)
+

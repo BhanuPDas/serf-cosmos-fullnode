@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package serf_p2p;
+option go_package= "github.com/zebaMH/cometbft/p2p/serf_ipc";
+
+message Member {
+  string id = 1;
+  string address = 2;
+  uint32 port = 3;
+  string status = 4;
+  map<string, string> tags = 5;
+}
+
+message GetMembersRequest {}
+
+message GetMembersResponse {
+  repeated Member members = 1;
+}
+
+message StreamMemberEventsRequest {}
+
+message StreamMemberEventsResponse {
+  enum EventType {
+    JOIN = 0;
+    LEAVE = 1;
+    FAIL = 2;
+    UPDATE = 3;
+  }
+  EventType event_type = 1;
+  Member member = 2;
+}
+
+service SerfDiscoveryService {
+  rpc GetMembers(GetMembersRequest) returns (GetMembersResponse);
+  rpc StreamMemberEvents(StreamMemberEventsRequest) returns (stream StreamMemberEventsResponse);
+}

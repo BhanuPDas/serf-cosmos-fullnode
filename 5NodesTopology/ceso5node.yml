@@ -1,0 +1,31 @@
+name: century
+
+topology:
+  nodes:
+    central_switch:
+      kind: ceos
+      image: testing954/ceos:4.28.0F
+
+    serf1:
+      kind: linux
+      image: anjummalik/ubuntu-with-serf-compatability
+    serf2:
+      kind: linux
+      image: anjummalik/ubuntu-with-serf-compatability
+    serf3:
+      kind: linux
+      image: anjummalik/ubuntu-with-serf-compatability
+    serf4:
+      kind: linux
+      image: anjummalik/ubuntu-with-serf-compatability
+    serf5:
+      kind: linux
+      image: anjummalik/ubuntu-with-serf-compatability
+    
+  links:
+    # Central switch to serf nodes
+    - endpoints: ["central_switch:eth1", "serf1:eth1"]
+    - endpoints: ["central_switch:eth2", "serf2:eth1"]
+    - endpoints: ["central_switch:eth3", "serf3:eth1"]
+    - endpoints: ["central_switch:eth4", "serf4:eth1"]
+    - endpoints: ["central_switch:eth5", "serf5:eth1"]

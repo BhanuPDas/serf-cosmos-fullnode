@@ -1,0 +1,31 @@
+---
+central_switch:
+    username: admin
+    password: admin
+    platform: ceos
+    hostname: 172.20.20.4
+serf1:
+    username: 
+    password: 
+    platform: linux
+    hostname: 172.20.20.3
+serf2:
+    username: 
+    password: 
+    platform: linux
+    hostname: 172.20.20.6
+serf3:
+    username: 
+    password: 
+    platform: linux
+    hostname: 172.20.20.5
+serf4:
+    username: 
+    password: 
+    platform: linux
+    hostname: 172.20.20.7
+serf5:
+    username: 
+    password: 
+    platform: linux
+    hostname: 172.20.20.2
