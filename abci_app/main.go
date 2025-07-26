@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -42,7 +43,6 @@ func NewMyApp() *MyApp {
 
 // Info is called to get information about the application.
 func (app *MyApp) Info(ctx context.Context, req *abci_types.InfoRequest) (*abci_types.InfoResponse, error) {
-    log.Printf("***********************Step2: Requesting Info **************")
 	log.Printf("ABCI Info: Received RequestInfo. Version: %s, BlockVersion: %d, P2PVersion: %d, ABCIVersion: %s",
 		req.Version, req.BlockVersion, req.P2PVersion, req.AbciVersion)
 
@@ -57,7 +57,6 @@ func (app *MyApp) Info(ctx context.Context, req *abci_types.InfoRequest) (*abci_
 
 // InitChain is called once upon genesis, when the blockchain is initialized.
 func (app *MyApp) InitChain(ctx context.Context, req *abci_types.InitChainRequest) (*abci_types.InitChainResponse, error) {
-    log.Printf("***********************Step1: Initializing **************")
 	log.Println("ABCI InitChain: Initializing minimal application state.")
 	app.lastBlockHeight = req.InitialHeight
 	app.appHash = []byte("initial_app_hash_after_init")
@@ -67,10 +66,15 @@ func (app *MyApp) InitChain(ctx context.Context, req *abci_types.InitChainReques
 
 // CheckTx is called to validate a transaction before it enters the mempool.
 func (app *MyApp) CheckTx(ctx context.Context, req *abci_types.CheckTxRequest) (*abci_types.CheckTxResponse, error) {
-    log.Printf("***********************Step3: Checking Transaction **************")
+	log.Printf("Request to validate Transaction (CheckTx): ")
 	log.Printf("ABCI CheckTx: Received raw transaction bytes : %s", string(req.Tx))
 
-	decodedJSONBytes := req.Tx
+	decodedJSONBytes, err1 := base64.StdEncoding.DecodeString(string(req.Tx))
+	if err1 != nil {
+		logMsg := fmt.Sprintf("ABCI CheckTx ERROR: Base64 decode failed: %v", err1)
+		log.Println(logMsg)
+		return &abci_types.CheckTxResponse{Code: 1, Log: logMsg}, nil
+	}
 	log.Printf("ABCI CheckTx: Successfully Base64 decoded to raw JSON bytes: %s", string(decodedJSONBytes))
 
 	var tx TransferTransaction
@@ -101,44 +105,52 @@ func (app *MyApp) CheckTx(ctx context.Context, req *abci_types.CheckTxRequest) (
 
 // DeliverTx is called when a transaction is included in a block and committed.
 func (app *MyApp) FinalizeBlock(ctx context.Context, req *abci_types.FinalizeBlockRequest) (*abci_types.FinalizeBlockResponse, error) {
-	// Log all transactions in the block as hex strings
-	log.Printf("***********************Step4: Executing Transaction **************")
+	log.Printf("Executing Transaction (FinalizeBlock):")
 	var txStrings []string
 	for _, txBytes := range req.Txs {
 		txStrings = append(txStrings, fmt.Sprintf("%x", txBytes))
 	}
-	log.Printf("ABCI DeliverTx: Processing transactions for block. Tx count: %d, Txs: %v", len(req.Txs), txStrings)
+	log.Printf("ABCI : Processing transactions for block. Tx count: %d, Txs: %v", len(req.Txs), txStrings)
 
 	app.lastBlockHeight = req.Height
 	app.appHash = []byte(fmt.Sprintf("app_hash_at_height_%d", req.Height))
-	log.Printf("ABCI FinalizeBlock: Height %d, New AppHash: %x", req.Height, app.appHash)
+	log.Printf("ABCI : Height %d, New AppHash: %x", req.Height, app.appHash)
 
-	// Initialize a slice to hold results for each transaction
 	txResults := make([]*abci_types.ExecTxResult, 0, len(req.Txs))
 
-	// Process each transaction
 	for _, txBytes := range req.Txs {
-		var tx TransferTransaction
-		err := json.Unmarshal(txBytes, &tx)
-		if err != nil {
-			logMsg := fmt.Sprintf("ABCI DeliverTx ERROR: Failed to unmarshal JSON: %v. Payload: %s", err, string(txBytes))
-			log.Println(logMsg)
-			// Return error with txResults processed so far (optional)
-			return &abci_types.FinalizeBlockResponse{
-				TxResults: txResults,
-				AppHash:   app.appHash,
-			}, nil
+		// Step 1: base64 decode the tx bytes (they are base64 encoded JSON)
+		decodedTxBytes, err2 := base64.StdEncoding.DecodeString(string(txBytes))
+		if err2 != nil {
+			log.Printf("ABCI ERROR: Failed to base64 decode tx: %v, Payload: %s", err2, string(txBytes))
+			txResults = append(txResults, &abci_types.ExecTxResult{
+				Code: 1,
+				Log:  "Failed to base64 decode tx",
+			})
+			continue // continue processing other txs
 		}
-		log.Printf("ABCI DeliverTx: Successfully processed transaction (no state change): %+v", tx)
 
-		// Append success result for this tx
+		// Step 2: unmarshal JSON
+		var tx TransferTransaction
+		err = json.Unmarshal(decodedTxBytes, &tx)
+		if err != nil {
+			log.Printf("ABCI ERROR: Failed to unmarshal JSON: %v. Payload: %s", err, string(decodedTxBytes))
+			txResults = append(txResults, &abci_types.ExecTxResult{
+				Code: 2,
+				Log:  "Failed to unmarshal JSON",
+			})
+			continue
+		}
+
+		log.Printf("ABCI : Successfully processed transaction: %+v", tx)
 		txResults = append(txResults, &abci_types.ExecTxResult{
-			Code: 0, // success
+			Code: 0,
 			Log:  "Transaction executed successfully",
 		})
 	}
 
-	log.Printf("ABCI FinalizeBlock: Finished processing %d transactions at Height %d", len(req.Txs), req.Height)
+	log.Printf("ABCI : Finished processing %d transactions at Height %d", len(req.Txs), req.Height)
+
 	return &abci_types.FinalizeBlockResponse{
 		TxResults: txResults,
 		AppHash:   app.appHash,
@@ -147,7 +159,7 @@ func (app *MyApp) FinalizeBlock(ctx context.Context, req *abci_types.FinalizeBlo
 
 // Commit is called to persist the current application state.
 func (app *MyApp) Commit(ctx context.Context, eq *abci_types.CommitRequest) (*abci_types.CommitResponse, error) {
-	log.Printf("ABCI Commit: Committing state at height %d with AppHash %x", app.lastBlockHeight, app.appHash)
+	log.Printf("ABCI : Committing state at height %d with AppHash %x", app.lastBlockHeight, app.appHash)
 	return &abci_types.CommitResponse{RetainHeight: 0}, nil
 }
 
