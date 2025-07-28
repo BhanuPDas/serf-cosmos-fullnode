@@ -13,3 +13,5 @@ This repository has code changes for serf-cosmetbft integration.
 ## Application Architecture
 
 This diagram shows the architecture of the application.
+
+![Blockchain Application Architecture](https://github.com/BhanuPDas/serf-cosmos-fullnode/blob/main/blockchainArchitecture.png)
