@@ -1,19 +1,15 @@
 import os
-import subprocess
 import json
 import base64
 import logging
 import threading
-import time
-import requests
 import random
-from flask import Flask, jsonify, render_template_string, request, redirect, url_for
-from collections import deque
+import redis
+from flask import Flask, jsonify, render_template_string
 import hashlib
-from datetime import datetime
-from cometbft_mempool_client import MempoolClient
-from serf_monitor import serf_monitor_thread, app_metrics
-
+from datetime import datetime, timezone
+from cometbft_client import MempoolClient
+from serf_client import serf_monitor_thread, app_metrics
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -30,6 +26,8 @@ recent_activity_log = []
 serf_monitor_thread_started = False
 serf_monitor_thread_lock = threading.Lock()
 cometbft_mempool_client = MempoolClient(COMETBFT_RPC_URL)
+r = redis.Redis(host='localhost', port=6379, decode_responses=True)
+stream_key = "transEventStream"
 
 
 @app.before_request
@@ -75,39 +73,28 @@ def trigger_random_transaction():
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     full_transaction_json = json.dumps(transaction_data)
-
     transaction_hash = hashlib.sha256(full_transaction_json.encode('utf-8')).hexdigest()
-
-    serf_payload_for_event = {"tx_hash": transaction_hash}
-    serf_payload_json_to_send = json.dumps(serf_payload_for_event)
-
     payload_b64_for_serf_event = base64.b64encode(full_transaction_json.encode('utf-8')).decode('utf-8')
-
     event_name = f"transfer-{sender_node['name']}-to-{receiver_node['name']}"
 
     try:
-        cmd_args = [
-            SERF_EXECUTABLE_PATH,
-            "event",
-            f"-rpc-addr={SERF_RPC_ADDR}",
-            event_name,
-            payload_b64_for_serf_event
-        ]
-        result = subprocess.run(cmd_args, capture_output=True, text=True, timeout=5)
+        msg = {"event": event_name, "payload": payload_b64_for_serf_event, "timestamp": datetime.now(timezone.utc).isoformat()}
+        msg_id = r.xadd(stream_key, msg)
 
-        if result.returncode == 0:
-            logger.info(f"Generated transaction JSON (full): {full_transaction_json}")
-            logger.debug(f"Base64-encoded Serf payload (small): {payload_b64_for_serf_event}")
-            logger.info(f"Successfully dispatched Serf event '{event_name}' via RPC. Output: {result.stdout.strip()}")
+        if msg_id:
+            logger.debug(f"Generated transaction JSON: {full_transaction_json}")
+            logger.info(f"Base64-encoded payload: {payload_b64_for_serf_event}")
+            logger.info(f"Successfully dispatched transaction event '{event_name}' to the queue: Msg ID: {msg_id}")
             return jsonify(
                 {"status": "success",
-                 "message": f"Transaction event '{event_name}' dispatched.",
-                 "payload_hash": transaction_hash}
+                 "message": f"Transaction event '{event_name}' dispatched to the Message Queue.",
+                 "payload_hash": transaction_hash,
+                 "msg_id": msg_id}
             ), 200
         else:
-            logger.error(f"Failed to dispatch Serf event '{event_name}'. Error: {result.stderr.strip()}")
+            logger.error(f"Failed to dispatch transaction event '{event_name}'.")
             return jsonify(
-                {"status": "error", "message": f"Failed to dispatch Serf event: {result.stderr.strip()}"}), 500
+                {"status": "error", "message": f"Failed to dispatch event:"}), 500
     except Exception as e:
         logger.error(f"Exception while dispatching Serf event: {e}")
         return jsonify({"status": "error", "message": f"Internal server error: {e}"}), 500
@@ -132,7 +119,6 @@ def status():
 def index():
     with metrics_lock:
         current_metrics = app_metrics.copy()
-        current_activity_log = recent_activity_log[:]
 
     serf_status_color = "bg-gray-700"
     if current_metrics["serf_rpc_status"] == "Connected":

@@ -5,6 +5,8 @@ import json
 import urllib.parse
 import threading
 import time
+from datetime import datetime, timezone
+import redis
 
 # Configure logger
 logging.basicConfig(
@@ -12,6 +14,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 logger = logging.getLogger(__name__)
+r = redis.Redis(host='localhost', port=6379, decode_responses=True)
+stream_key = "transEventStream"
 
 
 class MempoolClient:
@@ -26,7 +30,7 @@ class MempoolClient:
             response = requests.get(url, timeout=5)
             response.raise_for_status()
             status = response.json()
-            logger.info(f"[Status] Node status retrieved: {status}")
+            logger.debug(f"[Status] Node status retrieved: {status}")
             return status
         except requests.RequestException as e:
             logger.error(f"[Status] Failed to retrieve status: {e}")
@@ -67,10 +71,9 @@ class MempoolClient:
         """
         Dials a list of peers using /v1/dial_peers.
         Each peer string should be in format: <node_id>@<ip>:<port>
-        Example: "f9baeaa15fedf5e1ef7448dd60f46c01f1a9e9c4@1.2.3.4:26656"
         """
         try:
-            peers_encoded = json.dumps(peers)
+            peers_encoded = ",".join(peers)
             params = {
                 "peers": peers_encoded,
                 "persistent": str(persistent).lower()
@@ -86,12 +89,11 @@ class MempoolClient:
             logger.error(f"[P2P] Failed to dial peers: {e}")
             return None
 
-    def poll_tx_status(self, tx_hash: str, callback, max_attempts=10, interval=1):
+    def poll_tx_status(self, tx_hash: str, max_attempts=10, interval=1):
         """
         Poll tx status asynchronously on a separate thread.
 
         :param tx_hash: Transaction hash string.
-        :param callback: Function with signature (success: bool, tx_data: dict, msg: str).
         :param max_attempts: How many times to poll before giving up.
         :param interval: Seconds between polls.
         """
@@ -101,7 +103,7 @@ class MempoolClient:
             while attempts < max_attempts:
                 try:
                     url = f"{self.base_url}/v1/tx"
-                    params = {"hash": tx_hash}
+                    params = {"hash": f"0x{tx_hash.lstrip('0x')}", "prove": "true"}
                     response = requests.get(url, params=params, timeout=3)
                     if response.status_code != 200:
                         logger.warning(f"[PollTxStatus] HTTP {response.status_code}: {response.text}")
@@ -111,9 +113,14 @@ class MempoolClient:
 
                     result = response.json()
                     # Check if tx_result exists and code == 0 (success)
-                    tx_result = result.get("tx_result")
-                    if tx_result and tx_result.get("code", 1) == 0:
-                        callback(True, result, "Transaction committed successfully")
+                    tx_result = result.get("result")
+                    if tx_result:
+                        msg = {"event": "poll-event", "result": json.dumps(result),
+                               "success": str(True), "msg": "Transaction committed successfully",
+                               "timestamp": datetime.now(timezone.utc).isoformat()}
+                        cleaned_msg = {k: str(v) for k, v in msg.items() if v is not None}
+                        msg_id = r.xadd(stream_key, cleaned_msg)
+                        logger.info(f"Polling Results dispatched: {msg_id}")
                         return
                     else:
                         # Still pending or failed code
@@ -126,6 +133,11 @@ class MempoolClient:
                     time.sleep(interval)
 
             # Timeout or failure
-            callback(False, None, f"Transaction not confirmed after {max_attempts} attempts")
+            msg = {"event": "poll-event", "result": None,
+                   "success": str(False), "msg": f"Transaction not confirmed after {max_attempts} attempts",
+                   "timestamp": datetime.now(timezone.utc).isoformat()}
+            cleaned_msg1 = {k: str(v) for k, v in msg.items() if v is not None}
+            msg_id = r.xadd(stream_key, cleaned_msg1)
+            logger.info(f"Polling Results dispatched: {msg_id}")
 
         threading.Thread(target=poller, daemon=True).start()

@@ -7,7 +7,7 @@ COPY . .
 RUN go build -o abci-app main.go
 
 # Stage 2: Create a lightweight image
-FROM alpine:3.18
+FROM alpine:3.22
 WORKDIR /app
 RUN apk add --no-cache netcat-openbsd
 COPY --from=builder /app/abci-app .

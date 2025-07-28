@@ -132,7 +132,7 @@ func (app *MyApp) FinalizeBlock(ctx context.Context, req *abci_types.FinalizeBlo
 
 		// Step 2: unmarshal JSON
 		var tx TransferTransaction
-		err = json.Unmarshal(decodedTxBytes, &tx)
+		err := json.Unmarshal(decodedTxBytes, &tx)
 		if err != nil {
 			log.Printf("ABCI ERROR: Failed to unmarshal JSON: %v. Payload: %s", err, string(decodedTxBytes))
 			txResults = append(txResults, &abci_types.ExecTxResult{
