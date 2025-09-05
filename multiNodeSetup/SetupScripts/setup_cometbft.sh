@@ -51,7 +51,7 @@ setup_multinodes_cometbft() {
 
     # Add tags to Serf
     echo "Setting Serf Tags for $container..."
-    docker exec "$container" grpcurl -d "{\"tags\":{\"role\":\"buyer\",\"rpc_addr\":\"$nodeId@$ip_address:7373\"}}" 127.0.0.1:7373 serfapi.SerfService/SetTags
+    docker exec "$container" /root/go/bin/grpcurl -d "{\"tags\":{\"role\":\"buyer\",\"rpc_addr\":\"$nodeId@$ip_address:7373\"}}" 127.0.0.1:7373 serfapi.SerfService/SetTags
     
     # Install Python
     echo "Installing Python..."

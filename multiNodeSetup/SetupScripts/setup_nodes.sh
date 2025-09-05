@@ -75,11 +75,11 @@ EOF
     docker cp "$HOME/cometbftconfig/go.mod" "$container":/root/ || { echo "Failed to copy go mod file to $container"; exit 1; }
     docker cp "$HOME/cometbftconfig/serfapi.go" "$container":/root/ || { echo "Failed to copy serfapi go file to $container"; exit 1; }
     docker cp "$HOME/cometbftconfig/serf.proto" "$container":/root/ || { echo "Failed to copy serf proto file to $container"; exit 1; }
-    docker exec "$container" bash -c "cd /root && mkdir -p pb && chmod 644 pb"
+    docker exec "$container" bash -c "cd /root && mkdir -p pb && chmod 777 pb"
     docker cp "$HOME/cometbftconfig/pb/serf.pb.go" "$container":/root/pb/ || { echo "Failed to copy serf pb go file to $container"; exit 1; }
     docker cp "$HOME/cometbftconfig/pb/serf_grpc.pb.go" "$container":/root/pb/ || { echo "Failed to copy serf grpc pb go file to $container"; exit 1; }
-    docker exec "$container" bash -c "cd /root && /usr/local/go/bin/go clean -modcache && /usr/local/go/bin/go mod tidy && /usr/local/go/bin/go build -o /root/serf serfapi.go"
-    docker exec -d "$container" /root/serf
+    docker exec "$container" bash -c "cd /root && /usr/local/go/bin/go clean -modcache && /usr/local/go/bin/go mod tidy && /usr/local/go/bin/go build -o /root/serfapi serfapi.go"
+    docker exec -d "$container" /root/serfapi
     docker exec "$container" /usr/local/go/bin/go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
     echo "$container setup complete."
     
@@ -87,11 +87,11 @@ EOF
   acontainer="${containers[0]}"
   json_list=$(printf '"%s",' "${ip_list[@]}")
   json_list="[${json_list%,}]"
-  echo "List of Nodes: json_list"
+  echo "List of Nodes: $json_list"
   
   # Joining Cluster
-  docker exec "$acontainer" bash -c "grpcurl -d '{\"peers\":$json_list}' 127.0.0.1:7373 serfapi.SerfService/Join"
-  active_members=$(docker exec "$acontainer" grpcurl 127.0.0.1:7373 serfapi.SerfService/Members)
+  docker exec "$acontainer" bash -c "/root/go/bin/grpcurl -d '{\"peers\":$json_list}' 127.0.0.1:7373 serfapi.SerfService/Join"
+  active_members=$(docker exec "$acontainer" /root/go/bin/grpcurl 127.0.0.1:7373 serfapi.SerfService/Members)
   echo "Active Memebers: $active_members"
   echo "Serf Configured and Running..."
   
