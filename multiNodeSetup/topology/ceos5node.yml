@@ -1,0 +1,70 @@
+name: century
+
+topology:
+  nodes:
+    central_switch:
+      kind: ceos
+      image: testing954/ceos:4.28.0F
+
+    serf1:
+      kind: linux
+      image: testing954/liqo-client:v1
+      env:
+        CLAB_LINUX_PRIVILEGED: "true"
+      binds:
+        - /sys/fs/cgroup:/sys/fs/cgroup:rw
+        - /lib/modules:/lib/modules:ro
+        - /dev:/dev
+      cmd: "bash -c 'k3s server --node-name serf1 --disable traefik --disable-network-policy --tls-san 10.0.3.11 --snapshotter native & while true; do sleep 1000; done'"
+
+    serf2:
+      kind: linux
+      image: testing954/liqo-client:v1
+      env:
+        CLAB_LINUX_PRIVILEGED: "true"
+      binds:
+        - /sys/fs/cgroup:/sys/fs/cgroup:rw
+        - /lib/modules:/lib/modules:ro
+        - /dev:/dev
+      cmd: "bash -c 'k3s server --node-name serf2 --disable traefik --disable-network-policy --tls-san 10.0.3.12 --snapshotter native & while true; do sleep 1000; done'"
+
+    serf3:
+      kind: linux
+      image: testing954/liqo-client:v1
+      env:
+        CLAB_LINUX_PRIVILEGED: "true"
+      binds:
+        - /sys/fs/cgroup:/sys/fs/cgroup:rw
+        - /lib/modules:/lib/modules:ro
+        - /dev:/dev
+      cmd: "bash -c 'k3s server --node-name serf3 --disable traefik --disable-network-policy --tls-san 10.0.3.13 --snapshotter native & while true; do sleep 1000; done'"
+
+    serf4:
+      kind: linux
+      image: testing954/liqo-client:v1
+      env:
+        CLAB_LINUX_PRIVILEGED: "true"
+      binds:
+        - /sys/fs/cgroup:/sys/fs/cgroup:rw
+        - /lib/modules:/lib/modules:ro
+        - /dev:/dev
+      cmd: "bash -c 'k3s server --node-name serf4 --disable traefik --disable-network-policy --tls-san 10.0.3.14 --snapshotter native & while true; do sleep 1000; done'"
+
+    serf5:
+      kind: linux
+      image: testing954/liqo-client:v1
+      env:
+        CLAB_LINUX_PRIVILEGED: "true"
+      binds:
+        - /sys/fs/cgroup:/sys/fs/cgroup:rw
+        - /lib/modules:/lib/modules:ro
+        - /dev:/dev
+      cmd: "bash -c 'k3s server --node-name serf5 --disable traefik --disable-network-policy --tls-san 10.0.3.15 --snapshotter native & while true; do sleep 1000; done'"
+
+  links:
+    # Central switch to serf nodes
+    - endpoints: ["central_switch:eth1", "serf1:eth1"]
+    - endpoints: ["central_switch:eth2", "serf2:eth1"]
+    - endpoints: ["central_switch:eth3", "serf3:eth1"]
+    - endpoints: ["central_switch:eth4", "serf4:eth1"]
+    - endpoints: ["central_switch:eth5", "serf5:eth1"]

@@ -2,285 +2,203 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"github.com/hashicorp/memberlist"
+	"fmt"
+	"github.com/hashicorp/serf/client"
 	"log"
-	"net"
+	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
-
-	"github.com/hashicorp/serf/serf"
-	"google.golang.org/grpc"
-
-	pb "serfapp/pb"
 )
 
-type Config struct {
-	NodeName      string
-	BindAddr      string
-	BindPort      int
-	AdvertiseAddr string
-	AdvertisePort int
-	RPCAddr       string
-	RPCPort       int
-	Tags          map[string]string
-	JoinOnStart   []string
-}
-
-type App struct {
-	cfg    Config
-	serf   *serf.Serf
-	events chan serf.Event
-	logger *log.Logger
-	pb.UnimplementedSerfServiceServer
-}
-
-func loadConfig() Config {
-	cfg := Config{}
-
-	// Optional: load from JSON
-	file, err := os.Open("/opt/serfapp/node.json")
-	if err == nil {
-		defer file.Close()
-		var raw struct {
-			NodeName  string `json:"node_name"`
-			Bind      string `json:"bind"`
-			Advertise string `json:"advertise"`
-			RPCAddr   string `json:"rpc_addr"`
-		}
-		_ = json.NewDecoder(file).Decode(&raw)
-
-		cfg.NodeName = raw.NodeName
-
-		if raw.Bind != "" {
-			host, portStr, err := net.SplitHostPort(raw.Bind)
-			if err == nil {
-				cfg.BindAddr = host
-				if portStr != "" {
-					if p, err := strconv.Atoi(portStr); err == nil {
-						cfg.BindPort = p
-					}
-				}
-			}
-		}
-
-		if raw.Advertise != "" {
-			host, portStr, err := net.SplitHostPort(raw.Advertise)
-			if err == nil {
-				cfg.AdvertiseAddr = host
-				if portStr != "" {
-					if p, err := strconv.Atoi(portStr); err == nil {
-						cfg.AdvertisePort = p
-					}
-				}
-			}
-		}
-
-		if raw.RPCAddr != "" {
-			host, portStr, err := net.SplitHostPort(raw.RPCAddr)
-			if err == nil {
-				cfg.RPCAddr = host
-				if portStr != "" {
-					if p, err := strconv.Atoi(portStr); err == nil {
-						cfg.RPCPort = p
-					}
-				}
-			}
-		}
-	}
-
-	if cfg.Tags == nil {
-		cfg.Tags = map[string]string{}
-	}
-	if cfg.JoinOnStart == nil {
-		cfg.JoinOnStart = nil
-	}
-
-	return cfg
-}
-
-func (a *App) startSerf() error {
-	conf := serf.DefaultConfig()
-	conf.EventCh = a.events
-
-	mlc := memberlist.DefaultLANConfig()
-	mlc.BindAddr = a.cfg.BindAddr
-	mlc.BindPort = a.cfg.BindPort
-	if a.cfg.AdvertiseAddr != "" {
-		mlc.AdvertiseAddr = a.cfg.AdvertiseAddr
-	}
-	if a.cfg.AdvertisePort != 0 {
-		mlc.AdvertisePort = a.cfg.AdvertisePort
-	}
-
-	conf.MemberlistConfig = mlc
-	conf.NodeName = a.cfg.NodeName
-	conf.Tags = a.cfg.Tags
-
-	s, err := serf.Create(conf)
+func StartHTTPServer(ctx context.Context, listenAddr string, rpcAddr string) error {
+	// Create RPC client
+	c, err := client.ClientFromConfig(&client.Config{Addr: rpcAddr})
 	if err != nil {
+		return fmt.Errorf("failed to create RPC client: %w", err)
+	}
+	// if we exit, close client
+	go func() {
+		<-ctx.Done()
+		_ = c.Close()
+	}()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/members", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		members, err := c.Members()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, members)
+	})
+
+	mux.HandleFunc("/updatetags", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Tags       map[string]string `json:"tags"`
+			DeleteTags []string          `json:"delete_tags"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Tags == nil && len(req.DeleteTags) == 0 {
+			http.Error(w, "nothing to update", http.StatusBadRequest)
+			return
+		}
+		if err := c.UpdateTags(req.Tags, req.DeleteTags); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("/query", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Decode request payload
+		var req struct {
+			Name       string            `json:"name"`
+			Payload    string            `json:"payload"`
+			FilterTags map[string]string `json:"filter_tags,omitempty"`
+			Timeout    int               `json:"timeout_sec,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		respCh := make(chan client.NodeResponse, 10)
+		ackCh := make(chan string, 10)
+
+		qp := &client.QueryParam{
+			Name:       req.Name,
+			Payload:    []byte(req.Payload),
+			FilterTags: req.FilterTags,
+			RequestAck: true,
+			Timeout:    time.Duration(maxInt(time.Duration(req.Timeout)*time.Second, 5)) * time.Second,
+			AckCh:      ackCh,
+			RespCh:     respCh,
+		}
+
+		if err := c.Query(qp); err != nil {
+			http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		collectCtx, cancel := context.WithTimeout(r.Context(), qp.Timeout)
+		defer cancel()
+
+		acks := []string{}
+		responses := []struct {
+			From    string `json:"from"`
+			Payload string `json:"payload_b64"`
+		}{}
+
+		for {
+			select {
+			case a, ok := <-ackCh:
+				if !ok {
+					ackCh = nil
+				} else {
+					acks = append(acks, a)
+				}
+			case nr, ok := <-respCh:
+				if !ok {
+					respCh = nil
+				} else {
+					responses = append(responses, struct {
+						From    string `json:"from"`
+						Payload string `json:"payload_b64"`
+					}{
+						From:    nr.From,
+						Payload: base64.StdEncoding.EncodeToString(nr.Payload),
+					})
+				}
+			case <-collectCtx.Done():
+				if collectCtx.Err() == context.DeadlineExceeded {
+					http.Error(w, "query timed out", http.StatusGatewayTimeout)
+					return
+				}
+				http.Error(w, "request canceled", http.StatusRequestTimeout)
+				return
+			}
+
+			if ackCh == nil && respCh == nil {
+				break
+			}
+		}
+
+		writeJSON(w, map[string]interface{}{"acks": acks, "responses": responses})
+	})
+
+	httpSrv := &http.Server{
+		Addr:    listenAddr,
+		Handler: mux,
+	}
+
+	// run server in a goroutine and wait for context cancellation
+	errCh := make(chan error, 1)
+	go func() {
+		log.Printf("HTTP server listening on %s", listenAddr)
+		errCh <- httpSrv.ListenAndServe()
+	}()
+
+	select {
+	case <-ctx.Done():
+		// shutdown server gracefully
+		sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scancel()
+		_ = httpSrv.Shutdown(sctx)
+		return nil
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
 		return err
 	}
-	a.serf = s
-	a.logger.Printf("serf started: name=%s addr=%s port=%d", s.LocalMember().Name, s.LocalMember().Addr.String(), s.LocalMember().Port)
-	return nil
+}
+
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func maxInt(d time.Duration, fallback int) int {
+	if d > 0 {
+		return int(d / time.Second)
+	}
+	return fallback
 }
 
 func main() {
-	// logging
-	f, err := os.OpenFile("/var/log/serfapp.log",
-		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Fatalf("cannot open log file: %v", err)
-	}
-	defer f.Close()
-	logger := log.New(f, "[serf-grpc] ", log.LstdFlags|log.Lmicroseconds)
+	rpcAddr := "127.0.0.1:7373"
+	listen := "0.0.0.0:5555"
 
-	cfg := loadConfig()
-	app := &App{cfg: cfg, events: make(chan serf.Event, 512), logger: logger}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 
-	if err := app.startSerf(); err != nil {
-		logger.Fatalf("failed to start serf: %v", err)
+	// Start server (blocks until ctx is done or server fails)
+	if err := StartHTTPServer(ctx, listen, rpcAddr); err != nil {
+		log.Fatalf("server failed: %v", err)
 	}
 
-	go func() {
-		for ev := range app.events {
-			switch e := ev.(type) {
-			case serf.MemberEvent:
-				app.logger.Printf("member event: %s %v", e.Type.String(), e.Members)
-			case serf.UserEvent:
-				app.logger.Printf("user event: %s payload=%s", e.Name, string(e.Payload))
-			default:
-				app.logger.Printf("event: %#v", e)
-			}
-		}
-	}()
-
-	if len(cfg.JoinOnStart) > 0 {
-		n, err := app.serf.Join(cfg.JoinOnStart, true)
-		if err != nil {
-			logger.Printf("join on start failed: %v", err)
-		} else {
-			logger.Printf("joined %d peers on start", n)
-		}
-	}
-
-	// start gRPC
-	addr := net.JoinHostPort(cfg.RPCAddr, strconv.Itoa(cfg.RPCPort))
-	lis, err := net.Listen("tcp", addr)
-	if err != nil {
-		logger.Fatalf("failed to listen: %v", err)
-	}
-	grpcSrv := grpc.NewServer()
-	pb.RegisterSerfServiceServer(grpcSrv, app)
-
-	go func() {
-		logger.Printf("gRPC listening on %s", lis.Addr())
-		if err := grpcSrv.Serve(lis); err != nil {
-			logger.Fatalf("gRPC server failed: %v", err)
-		}
-	}()
-
-	// graceful shutdown
-	sigch := make(chan os.Signal, 1)
-	signal.Notify(sigch, syscall.SIGINT, syscall.SIGTERM)
-	<-sigch
-	logger.Println("shutdown signal received")
-
-	app.serf.Leave()
-	app.serf.Shutdown()
-	grpcSrv.GracefulStop()
-	logger.Println("stopped")
-}
-
-// --------- gRPC Methods ---------
-
-func (a *App) Join(ctx context.Context, req *pb.JoinRequest) (*pb.JoinResponse, error) {
-	if len(req.Peers) == 0 {
-		return nil, errors.New("peers required")
-	}
-	n, err := a.serf.Join(req.Peers, true)
-	if err != nil {
-		return nil, err
-	}
-	return &pb.JoinResponse{Joined: int32(n)}, nil
-}
-
-func (a *App) Leave(ctx context.Context, req *pb.LeaveRequest) (*pb.LeaveResponse, error) {
-	if err := a.serf.Leave(); err != nil {
-		return nil, err
-	}
-	return &pb.LeaveResponse{Result: "left"}, nil
-}
-
-func (a *App) SetTags(ctx context.Context, req *pb.SetTagsRequest) (*pb.SetTagsResponse, error) {
-	if err := a.serf.SetTags(req.Tags); err != nil {
-		return nil, err
-	}
-	return &pb.SetTagsResponse{Ok: true, Tags: req.Tags}, nil
-}
-
-func (a *App) Members(ctx context.Context, req *pb.MembersRequest) (*pb.MembersResponse, error) {
-	members := a.serf.Members()
-	resp := &pb.MembersResponse{}
-	for _, m := range members {
-		resp.Members = append(resp.Members, &pb.Member{
-			Name:   m.Name,
-			Addr:   m.Addr.String(),
-			Port:   int32(m.Port),
-			Status: int32(m.Status),
-			Tags:   m.Tags,
-		})
-	}
-	return resp, nil
-}
-
-func (a *App) Query(ctx context.Context, req *pb.QueryRequest) (*pb.QueryResponse, error) {
-	if req.Name == "" {
-		return nil, errors.New("name required")
-	}
-	if req.TimeoutMs <= 0 {
-		req.TimeoutMs = 2000
-	}
-
-	q, err := a.serf.Query(req.Name, []byte(req.Payload), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer q.Close()
-
-	timeout := time.NewTimer(time.Duration(req.TimeoutMs) * time.Millisecond)
-	defer timeout.Stop()
-
-	resp := &pb.QueryResponse{}
-loop:
-	for {
-		select {
-		case rply, ok := <-q.ResponseCh():
-			if !ok {
-				break loop
-			}
-			resp.Results = append(resp.Results, &pb.QueryResult{
-				From:    rply.From,
-				Payload: string(rply.Payload),
-			})
-		case <-timeout.C:
-			break loop
-		}
-	}
-	return resp, nil
-}
-
-func (a *App) Broadcast(ctx context.Context, req *pb.BroadcastRequest) (*pb.BroadcastResponse, error) {
-	if req.Name == "" {
-		return nil, errors.New("name required")
-	}
-	if err := a.serf.UserEvent(req.Name, []byte(req.Payload), req.Coalesce); err != nil {
-		return nil, err
-	}
-	return &pb.BroadcastResponse{Result: "ok"}, nil
+	// give a moment to shutdown
+	time.Sleep(100 * time.Millisecond)
+	log.Println("server stopped")
 }
