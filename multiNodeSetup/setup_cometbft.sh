@@ -2,7 +2,7 @@
 
 # List of containers (Ubuntu nodes)
 containers=()
-for i in {1..5}; do
+for i in {1..25}; do
   containers+=(clab-century-serf$i)
 done
 
@@ -19,11 +19,16 @@ setup_multinodes_cometbft() {
     echo "IP address for $container (eth1): $ip_address"
     
     # Install Redis
-    docker exec "$container" bash -c "apt-get update && apt-get install -y lsb-release curl gpg && \
-    curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg && \
-    chmod 644 /usr/share/keyrings/redis-archive-keyring.gpg && \
-    echo 'deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main' | tee /etc/apt/sources.list.d/redis.list && \
-    apt-get update && apt-get install -y redis"
+    docker exec "$container" bash -c "
+    rm -f /etc/apt/sources.list.d/redis.list
+    set -e 
+    apt-get update
+    apt-get install -y software-properties-common
+    add-apt-repository universe
+    apt-get update
+    apt-get install -y redis-server
+    redis-server --daemonize yes
+    "
     rVersion=$(docker exec "$container" redis-server --version)
     docker exec "$container" redis-server --daemonize yes
     echo "Redis $rVersion installation complete."
@@ -35,20 +40,12 @@ setup_multinodes_cometbft() {
     goVersion=$(docker exec "$container" /usr/local/go/bin/go version)
     echo "$goVersion installation complete."
     
-    # Configure ABCI server
-    echo "Configuring ABCI server..."
-    docker exec "$container" bash -c "cd /root && mkdir -p abci"
-    docker cp "$HOME/cometbftconfig/abci/go.mod" "$container":/root/abci/ || { echo "Failed to copy go mod file to $container"; exit 1; }
-    docker cp "$HOME/cometbftconfig/abci/main.go" "$container":/root/abci/ || { echo "Failed to copy abci main go file to $container"; exit 1; }
-    docker exec "$container" bash -c "cd /root/abci && /usr/local/go/bin/go clean -modcache && /usr/local/go/bin/go mod tidy && /usr/local/go/bin/go build -o /root/abci-app main.go"
-    docker exec -d "$container" /root/abci-app
-    
     # Configure Serf server
     echo "Configuring Serf server..."
     docker exec "$container" bash -c "cd /root && mkdir -p serfapi"
     docker cp "$HOME/cometbftconfig/serfapi/go.mod" "$container":/root/serfapi/ || { echo "Failed to copy go mod file to $container"; exit 1; }
     docker cp "$HOME/cometbftconfig/serfapi/serfapi.go" "$container":/root/serfapi/ || { echo "Failed to copy serfapi go file to $container"; exit 1; }
-    docker exec "$container" bash -c "cd /root && /usr/local/go/bin/go clean -modcache && /usr/local/go/bin/go mod tidy && /usr/local/go/bin/go build -o /root/serf-api serfapi.go"
+    docker exec "$container" bash -c "cd /root/serfapi && /usr/local/go/bin/go clean -modcache && /usr/local/go/bin/go mod tidy && /usr/local/go/bin/go build -o /root/serf-api serfapi.go"
     docker exec -d "$container" /root/serf-api
     
     # Install CometBFT
@@ -56,6 +53,14 @@ setup_multinodes_cometbft() {
     docker exec "$container" /usr/local/go/bin/go install github.com/cometbft/cometbft/cmd/cometbft@v1.0.0
     cVersion=$(docker exec "$container" /root/go/bin/cometbft version)
     echo "CometBFT $cVersion installation complete."
+    
+    # Configure ABCI server
+    echo "Configuring ABCI server..."
+    docker exec "$container" bash -c "cd /root && mkdir -p abci"
+    docker cp "$HOME/cometbftconfig/abci/go.mod" "$container":/root/abci/ || { echo "Failed to copy go mod file to $container"; exit 1; }
+    docker cp "$HOME/cometbftconfig/abci/main.go" "$container":/root/abci/ || { echo "Failed to copy abci main go file to $container"; exit 1; }
+    docker exec "$container" bash -c "cd /root/abci && /usr/local/go/bin/go clean -modcache && /usr/local/go/bin/go mod tidy && /usr/local/go/bin/go build -o /root/abci-app main.go"
+    docker exec -d "$container" /root/abci-app
 
     # Init CometBFT
     echo "Configuring Cometbft..."
@@ -69,7 +74,7 @@ setup_multinodes_cometbft() {
 
     # Add tags to Serf
     echo "Setting Serf Tags for $container..."
-    docker exec "$container" curl -i -X POST -H "Content-Type: application/json" -d "{\"tags\":{\"role\":\"buyer\",\"rpc_addr\":\"$nodeId@$ip_address:7373\"}}" http://127.0.0.1:5555/updatetags
+    docker exec "$container" curl -i -X POST -H "Content-Type: application/json" -d "{\"tags\":{\"rpc_addr\":\"$nodeId@$ip_address:26656\"}}" http://127.0.0.1:5555/updatetags
     
     # Install Python
     echo "Installing Python..."
@@ -77,9 +82,8 @@ setup_multinodes_cometbft() {
     pVersion=$(docker exec "$container" python3 --version)
     echo "$pVersion installation complete."
     echo "Copying Serf Client and Cometbft client..."
-    docker cp "$HOME/cometbftconfig/cometclient/serf_client.py" "$container":/root/ || { echo "Failed to copy serf_client.py file to $container"; exit 1; }
-    docker cp "$HOME/cometbftconfig/cometclient/cometbft_client.py" "$container":/root/ || { echo "Failed to copy cometbft_client.py file to $container"; exit 1; }
-    docker exec -d "$container" python3 /root/serf_client.py 
+    docker cp "$HOME/cometbftconfig/cometclient/main.py" "$container":/root/ || { echo "Failed to copy main.py file to $container"; exit 1; }
+    #docker exec -d "$container" python3 /root/serf_client.py 
 
     echo "Cometbft setup in $container is complete."
     

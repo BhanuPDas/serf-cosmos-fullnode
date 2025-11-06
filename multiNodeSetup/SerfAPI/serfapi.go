@@ -187,8 +187,8 @@ func maxInt(d time.Duration, fallback int) int {
 }
 
 func main() {
-	rpcAddr := "127.0.0.1:7373"
-	listen := "0.0.0.0:5555"
+	rpcAddr := "0.0.0.0:7373"
+	listen := "127.0.0.1:5555"
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
