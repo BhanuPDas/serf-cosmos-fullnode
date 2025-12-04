@@ -12,4 +12,4 @@ This repository has code changes and CometBFT configurations for 25 Node Topolog
 7. If ABCI client or CometBFT is down or not responding, in either case, run reset_comet script. It will automatically restart the application. ***./reset_comet.sh***
 
 
-```Note: The configuration/reset scripts are applicable for 25 Nodes topology. For other topology set, these scripts needs to be updated accordingly.```
+```Note: The configuration/reset scripts are applicable for 25 Nodes topology only. For other topology setup, these scripts need to be updated accordingly.```
