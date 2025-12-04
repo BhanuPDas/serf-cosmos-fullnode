@@ -1,0 +1,7 @@
+cd /root/abci
+/usr/local/go/bin/go clean -modcache
+/usr/local/go/bin/go mod tidy
+/usr/local/go/bin/go build -o /root/abci-app main.go
+/root/go/bin/cometbft unsafe-reset-all
+nohup /root/abci-app > /root/abci.log 2>&1 &
+nohup /root/go/bin/cometbft node > /root/cometbft.log 2>&1 &

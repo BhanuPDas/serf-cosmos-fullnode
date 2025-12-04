@@ -1,0 +1,86 @@
+package main
+
+import (
+	"flag"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time" // Added for the mock mempool
+
+	"github.com/cometbft/cometbft/abci/types"     // For abci.ResponseCheckTx and types.Mempool interface
+	cmn "github.com/cometbft/cometbft/libs/bytes" // For cmn.HexBytes
+	// IMPORTANT: This import path has been fixed to use your module's base path.
+	"gopyserf/bridge/p2p" // This MUST match your go.mod module path + /p2p
+)
+
+// --- Mocks for CometBFT Node and Mempool ---
+// These are simple mocks to allow the code to compile and demonstrate interaction.
+// In a real application, you would initialize a full CometBFT node here.
+
+// MockMempool implements types.Mempool for testing purposes.
+type MockMempool struct{}
+
+// CheckTx simulates broadcasting a transaction to the mempool.
+// In a real scenario, this would involve complex validation and state updates.
+func (mm *MockMempool) CheckTx(tx types.Tx, peerID interface{}) *types.ResponseCheckTx {
+	log.Printf("Mock Mempool received transaction: %s (PeerID: %v)", cmn.HexBytes(tx).String(), peerID)
+	// Simulate a successful check for demonstration
+	return &types.ResponseCheckTx{
+		Code: 0, // 0 indicates success
+		Log:  fmt.Sprintf("Tx %s received by mock mempool at %s", cmn.HexBytes(tx).String(), time.Now().Format(time.RFC3339)),
+	}
+}
+
+// Ensure MockMempool satisfies the types.Mempool interface
+var _ types.Mempool = (*MockMempool)(nil)
+
+// MockNode simulates a CometBFT node for testing purposes.
+type MockNode struct{}
+
+// Mempool returns a mock mempool instance.
+func (mn *MockNode) Mempool() types.Mempool {
+	return &MockMempool{}
+}
+
+// initializeCometNode is a placeholder for your actual CometBFT node initialization logic.
+// For this example, it returns a mock node.
+func initializeCometNode() *MockNode {
+	log.Println("Initializing mock CometBFT node...")
+	return &MockNode{}
+}
+
+// --- End Mocks ---
+
+func main() {
+	// Pick any one Serf RPC endpoint; cluster gossip carries events everywhere.
+	serfRPCAddr := flag.String("serf-addr", "10.0.1.11:7373", "Serf RPC address")
+	flag.Parse()
+
+	// Initialize the CometBFT node (now using a mock for demonstration)
+	node := initializeCometNode()
+	mp := node.Mempool() // Get the mempool interface from the mock node
+
+	log.Printf("Initializing SerfAdapter with Serf RPC: %s and CometBFT Mempool", *serfRPCAddr)
+
+	// Create a new SerfAdapter instance, passing the Serf RPC address and the mock Mempool
+	adapter, err := p2p.NewSerfAdapter(*serfRPCAddr, mp)
+	if err != nil {
+		log.Fatalf("SerfAdapter init failed: %v", err)
+	}
+
+	log.Printf("Listening for Serf events on %s …", *serfRPCAddr)
+	// Start streaming Serf events in a goroutine
+	go adapter.Start()
+
+	// Set up a channel to listen for OS signals to gracefully shut down
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Block until a signal is received
+	s := <-sigChan
+	log.Printf("Received signal %s. Shutting down...", s)
+
+	// Add any cleanup logic if necessary here
+	log.Println("Application gracefully stopped.")
+}

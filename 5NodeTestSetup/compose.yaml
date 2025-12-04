@@ -1,0 +1,39 @@
+services:
+  cometbft:
+    image: cometbft/cometbft:v1.0.0
+    container_name: cometbft-node
+    command: node --proxy_app=abci-app:26658
+    volumes:
+      - './cometLatest:/cometbft'
+    ports:
+      - '26656:26656'
+      - '26657:26657'
+      - '26660:26660'
+    depends_on:
+      - abci-app
+    networks:
+      - abci-net
+  abci-app:
+    build:
+      context: ./abci_app
+      dockerfile: Dockerfile
+    container_name: my-abci-app
+    ports:
+      - '26658:26658'
+    networks:
+      - abci-net
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "26658"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+  redis:
+    image: redis:8.0
+    container_name: redis
+    ports:
+      - '6379:6379'
+    networks:
+      - abci-net
+networks:
+  abci-net:
+    driver: bridge
